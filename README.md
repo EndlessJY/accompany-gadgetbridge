@@ -1,4 +1,10 @@
-Gadgetbridge is hosted on [codeberg.org](https://codeberg.org/Freeyourgadget/Gadgetbridge/).
+> This repository is an independent Accompany-compatible variant based on
+> [Gadgetbridge](https://codeberg.org/Freeyourgadget/Gadgetbridge/). It is not
+> maintained or endorsed by the upstream Gadgetbridge project. See
+> [ACCOMPANY_INTEGRATION.md](ACCOMPANY_INTEGRATION.md) for the exact delta,
+> security boundary, build identity and upstream synchronization policy.
+
+The official Gadgetbridge project is hosted on [codeberg.org](https://codeberg.org/Freeyourgadget/Gadgetbridge/).
 
 
 Gadgetbridge

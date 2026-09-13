@@ -908,6 +908,14 @@
             android:exported="true" />
 
         <provider
+            android:name=".contentprovider.AccompanyHealthProvider"
+            android:authorities="com.example.sender.gadgetbridge.health"
+            android:exported="true"
+            android:grantUriPermissions="false"
+            android:readPermission="com.example.sender.permission.READ_GADGETBRIDGE_HEALTH"
+            android:writePermission="com.example.sender.permission.READ_GADGETBRIDGE_HEALTH" />
+
+        <provider
             android:name="androidx.core.content.FileProvider"
             android:authorities="${applicationId}.screenshot_provider"
             android:exported="false"
