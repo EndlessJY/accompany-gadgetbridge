@@ -18,9 +18,12 @@ final class AccompanyHealthSnapshot {
     static final int CONTRACT_VERSION = 1;
 
     private final JSONObject values = new JSONObject();
+    private final long readAt;
     private int metricCount;
+    private long dataUpdatedAt;
 
     AccompanyHealthSnapshot(final long readAt) {
+        this.readAt = readAt;
         put("contractVersion", CONTRACT_VERSION);
         put("readAt", readAt);
     }
@@ -41,15 +44,38 @@ final class AccompanyHealthSnapshot {
         return this;
     }
 
-    AccompanyHealthSnapshot putTimestamp(final String key, final long value, final long readAt) {
-        if (value > 0L && value <= readAt + 5L * 60L * 1000L) {
+    AccompanyHealthSnapshot putTimestamp(
+            final String key,
+            final long value,
+            final long readAt,
+            final String... measurementKeys
+    ) {
+        boolean hasMeasurement = false;
+        for (final String measurementKey : measurementKeys) {
+            if (values.has(measurementKey)) {
+                hasMeasurement = true;
+                break;
+            }
+        }
+        if (hasMeasurement && value > 0L && value <= readAt + 5L * 60L * 1000L) {
             put(key, value);
+            markDataUpdatedAt(value);
+        }
+        return this;
+    }
+
+    AccompanyHealthSnapshot markDataUpdatedAt(final long value) {
+        if (value > 0L && value <= readAt + 5L * 60L * 1000L) {
+            dataUpdatedAt = Math.max(dataUpdatedAt, value);
         }
         return this;
     }
 
     JSONObject build() {
         put("state", metricCount > 0 ? "ready" : "no_data");
+        if (metricCount > 0 && dataUpdatedAt > 0L) {
+            put("dataUpdatedAt", dataUpdatedAt);
+        }
         return values;
     }
 

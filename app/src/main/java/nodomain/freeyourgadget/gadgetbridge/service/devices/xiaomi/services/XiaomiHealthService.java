@@ -36,9 +36,11 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Set;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 import nodomain.freeyourgadget.gadgetbridge.GBApplication;
 import nodomain.freeyourgadget.gadgetbridge.activities.devicesettings.DeviceSettingsPreferenceConst;
+import nodomain.freeyourgadget.gadgetbridge.contentprovider.AccompanyRealtimeActivitySnapshot;
 import nodomain.freeyourgadget.gadgetbridge.database.DBHandler;
 import nodomain.freeyourgadget.gadgetbridge.database.DBHelper;
 import nodomain.freeyourgadget.gadgetbridge.deviceevents.GBDeviceEventUpdatePreferences;
@@ -55,6 +57,7 @@ import nodomain.freeyourgadget.gadgetbridge.model.ActivityKind;
 import nodomain.freeyourgadget.gadgetbridge.model.ActivitySample;
 import nodomain.freeyourgadget.gadgetbridge.model.ActivityUser;
 import nodomain.freeyourgadget.gadgetbridge.model.DeviceService;
+import nodomain.freeyourgadget.gadgetbridge.model.DeviceType;
 import nodomain.freeyourgadget.gadgetbridge.proto.xiaomi.XiaomiProto;
 import nodomain.freeyourgadget.gadgetbridge.service.SleepAsAndroidSender;
 import nodomain.freeyourgadget.gadgetbridge.service.devices.xiaomi.XiaomiPreferences;
@@ -105,6 +108,7 @@ public class XiaomiHealthService extends AbstractXiaomiService {
     private static final int SAA_SPORT_INFO_TYPE = 16;      // AstroBox SportType.HIGH_INTERVAL_TRAINING
     // Number of accel batches between phone acks
     private static final int RAW_SENSOR_ACK_INTERVAL = 10;
+    private static final long ACCOMPANY_REALTIME_SNAPSHOT_TIMEOUT_MS = 15_000L;
 
     private static final int GENDER_MALE = 1;
     private static final int GENDER_FEMALE = 2;
@@ -117,6 +121,15 @@ public class XiaomiHealthService extends AbstractXiaomiService {
     private boolean realtimeStarted = false;
     private boolean realtimeOneShot = false;
     private int previousSteps = -1;
+    private final AtomicBoolean accompanyRealtimeSnapshotPending = new AtomicBoolean(false);
+    private final AtomicBoolean accompanyRealtimeSnapshotOwnsStream = new AtomicBoolean(false);
+    private final Handler accompanyRealtimeSnapshotHandler = new Handler();
+    private final Runnable accompanyRealtimeSnapshotTimeout = () -> {
+        if (!accompanyRealtimeSnapshotPending.getAndSet(false)) return;
+        if (accompanyRealtimeSnapshotOwnsStream.getAndSet(false)) {
+            enableRealtimeStats(false);
+        }
+    };
 
     private boolean gpsStarted = false;
     private boolean gpsFixAcquired = false;
@@ -240,6 +253,9 @@ public class XiaomiHealthService extends AbstractXiaomiService {
     @Override
     public void dispose() {
         gpsTimeoutHandler.removeCallbacksAndMessages(null);
+        accompanyRealtimeSnapshotHandler.removeCallbacksAndMessages(null);
+        accompanyRealtimeSnapshotPending.set(false);
+        accompanyRealtimeSnapshotOwnsStream.set(false);
         gpsStarted = false;
         gpsFixAcquired = false;
         workoutStarted = false;
@@ -852,7 +868,26 @@ public class XiaomiHealthService extends AbstractXiaomiService {
     public void onFetchRecordedData(final int dataTypes) {
         LOG.debug("Fetch recorded data: {}", String.format("0x%08X", dataTypes));
 
+        requestAccompanyRealtimeSnapshot();
         fetchRecordedDataToday();
+    }
+
+    private void requestAccompanyRealtimeSnapshot() {
+        if (getSupport().getDevice().getType() != DeviceType.MIBAND9PRO
+                || !accompanyRealtimeSnapshotPending.compareAndSet(false, true)) {
+            return;
+        }
+
+        accompanyRealtimeSnapshotHandler.removeCallbacks(accompanyRealtimeSnapshotTimeout);
+        final boolean ownsStream = !realtimeStarted;
+        accompanyRealtimeSnapshotOwnsStream.set(ownsStream);
+        if (ownsStream) {
+            setRealtimeStats(true);
+        }
+        accompanyRealtimeSnapshotHandler.postDelayed(
+                accompanyRealtimeSnapshotTimeout,
+                ACCOMPANY_REALTIME_SNAPSHOT_TIMEOUT_MS
+        );
     }
 
     private void fetchRecordedDataToday() {
@@ -943,6 +978,7 @@ public class XiaomiHealthService extends AbstractXiaomiService {
     public void onHeartRateTest() {
         LOG.debug("Trigger heart rate one-shot test");
 
+        accompanyRealtimeSnapshotOwnsStream.set(false);
         realtimeStarted = true;
         realtimeOneShot = true;
 
@@ -956,6 +992,14 @@ public class XiaomiHealthService extends AbstractXiaomiService {
     }
 
     public void enableRealtimeStats(final boolean enable) {
+        if (enable) {
+            // A later explicit request owns the stream; the temporary Accompany lease must not stop it.
+            accompanyRealtimeSnapshotOwnsStream.set(false);
+        }
+        setRealtimeStats(enable);
+    }
+
+    private void setRealtimeStats(final boolean enable) {
         LOG.debug("Enable realtime stats: {}", enable);
 
         if (realtimeStarted == enable) {
@@ -978,6 +1022,23 @@ public class XiaomiHealthService extends AbstractXiaomiService {
 
     private void handleRealtimeStats(final XiaomiProto.RealTimeStats realTimeStats) {
         LOG.debug("Got realtime stats");
+
+        if (accompanyRealtimeSnapshotPending.getAndSet(false)) {
+            accompanyRealtimeSnapshotHandler.removeCallbacks(accompanyRealtimeSnapshotTimeout);
+            AccompanyRealtimeActivitySnapshot.update(
+                    getSupport().getDevice(),
+                    realTimeStats.getSteps(),
+                    realTimeStats.getHeartRate(),
+                    System.currentTimeMillis()
+            );
+            final Intent currentData = new Intent(GBApplication.ACTION_NEW_DATA)
+                    .putExtra(GBDevice.EXTRA_DEVICE, getSupport().getDevice());
+            LocalBroadcastManager.getInstance(getSupport().getContext()).sendBroadcast(currentData);
+            if (accompanyRealtimeSnapshotOwnsStream.getAndSet(false)) {
+                enableRealtimeStats(false);
+                return;
+            }
+        }
 
         if (!realtimeOneShot && !realtimeStarted) {
             // Failsafe in case it gets out of sync, stop it

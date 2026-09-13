@@ -38,6 +38,7 @@ import java.util.Set;
 import java.util.concurrent.TimeUnit;
 
 import nodomain.freeyourgadget.gadgetbridge.GBApplication;
+import nodomain.freeyourgadget.gadgetbridge.contentprovider.AccompanyHealthSnapshotPublisher;
 import nodomain.freeyourgadget.gadgetbridge.impl.GBDevice;
 import nodomain.freeyourgadget.gadgetbridge.util.GBPrefs;
 import nodomain.freeyourgadget.gadgetbridge.util.healthconnect.HealthConnectSyncWorker;
@@ -77,9 +78,13 @@ public class NewDataReceiver extends BroadcastReceiver {
 
     @Override
     public void onReceive(Context context, Intent intent) {
+        if (!ACTION_NEW_DATA.equals(intent.getAction())) {
+            return;
+        }
+        AccompanyHealthSnapshotPublisher.schedule(context);
+
         GBPrefs prefs = GBApplication.getPrefs();
-        if (ACTION_NEW_DATA.equals(intent.getAction()) &&
-                prefs.getBoolean(GBPrefs.HEALTH_CONNECT_ENABLED, false) &&
+        if (prefs.getBoolean(GBPrefs.HEALTH_CONNECT_ENABLED, false) &&
                 prefs.getBoolean(GBPrefs.HEALTH_CONNECT_SYNC_ON_EVENT, false)) {
 
             // Extract device from the intent

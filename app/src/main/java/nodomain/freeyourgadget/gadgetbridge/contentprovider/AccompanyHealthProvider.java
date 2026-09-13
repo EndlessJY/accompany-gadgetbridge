@@ -15,6 +15,8 @@ import android.content.ContentValues;
 import android.database.Cursor;
 import android.database.MatrixCursor;
 import android.net.Uri;
+import android.os.Bundle;
+import android.os.SystemClock;
 
 import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
@@ -45,6 +47,7 @@ import nodomain.freeyourgadget.gadgetbridge.model.HeartRateSample;
 import nodomain.freeyourgadget.gadgetbridge.model.HrvValueSample;
 import nodomain.freeyourgadget.gadgetbridge.model.PaiSample;
 import nodomain.freeyourgadget.gadgetbridge.model.RespiratoryRateSample;
+import nodomain.freeyourgadget.gadgetbridge.model.RecordedDataTypes;
 import nodomain.freeyourgadget.gadgetbridge.model.Spo2Sample;
 import nodomain.freeyourgadget.gadgetbridge.model.StressSample;
 import nodomain.freeyourgadget.gadgetbridge.model.TemperatureSample;
@@ -54,17 +57,24 @@ import nodomain.freeyourgadget.gadgetbridge.model.Vo2MaxSample;
 /**
  * Fixed read-only bridge for a bounded health summary.
  *
- * Android performs signature-permission enforcement before this provider is
- * entered. The API deliberately offers no caller-controlled device or range.
+ * Every data-bearing entry point performs signature-permission enforcement.
+ * The API deliberately offers no caller-controlled device or range.
  */
 public class AccompanyHealthProvider extends ContentProvider {
-    static final String AUTHORITY = "com.example.sender.gadgetbridge.health";
+    static final String AUTHORITY = "nodomain.freeyourgadget.gadgetbridge.accompany.health";
+    static final String LEGACY_AUTHORITY = "com.example.sender.gadgetbridge.health";
     static final Uri SUMMARY_URI = Uri.parse("content://" + AUTHORITY + "/summary");
+    static final Uri LEGACY_SUMMARY_URI = Uri.parse("content://" + LEGACY_AUTHORITY + "/summary");
     static final String COLUMN_SNAPSHOT_JSON = "snapshot_json";
+    static final String METHOD_REQUEST_SYNC = "request_sync";
+    static final String KEY_SYNC_STATUS = "status";
+    static final String READ_PERMISSION = "com.example.sender.permission.READ_GADGETBRIDGE_HEALTH";
 
     private static final long DAY_MS = 24L * 60L * 60L * 1000L;
     private static final long RECENT_MS = DAY_MS;
     private static final long VO2_WINDOW_MS = 30L * DAY_MS;
+    private static final long MINIMUM_SYNC_INTERVAL_MS = 2L * 60L * 1000L;
+    private static final AccompanyHealthSyncGate SYNC_GATE = new AccompanyHealthSyncGate(MINIMUM_SYNC_INTERVAL_MS);
 
     @Override
     public boolean onCreate() {
@@ -80,10 +90,59 @@ public class AccompanyHealthProvider extends ContentProvider {
             @Nullable final String[] selectionArgs,
             @Nullable final String sortOrder
     ) {
+        enforceCallerPermission("Caller cannot read wearable health data");
         requireFixedRead(uri, projection, selection, selectionArgs, sortOrder);
         final MatrixCursor cursor = new MatrixCursor(new String[]{COLUMN_SNAPSHOT_JSON}, 1);
         cursor.addRow(new Object[]{readSnapshot().toString()});
         return cursor;
+    }
+
+    @Nullable
+    @Override
+    public Bundle call(
+            @NonNull final String method,
+            @Nullable final String arg,
+            @Nullable final Bundle extras
+    ) {
+        if (!METHOD_REQUEST_SYNC.equals(method)) return super.call(method, arg, extras);
+        enforceCallerPermission("Caller cannot request wearable health synchronization");
+        if (arg != null || extras != null) {
+            throw new IllegalArgumentException("Health sync does not accept caller parameters");
+        }
+
+        final Bundle result = new Bundle(1);
+        result.putString(KEY_SYNC_STATUS, requestSyncStatus());
+        return result;
+    }
+
+    public static String requestSyncStatus() {
+        final GBDevice device = selectDevice();
+        final boolean connected = device != null && device.isInitialized();
+        final boolean supported = device != null
+                && device.getDeviceCoordinator().supportsDataFetching(device);
+        final boolean busy = device != null && device.isBusy();
+        final long requestAt = SystemClock.elapsedRealtime();
+        AccompanyHealthSyncGate.Status status = SYNC_GATE.request(
+                requestAt,
+                connected,
+                supported,
+                busy
+        );
+        if (status == AccompanyHealthSyncGate.Status.STARTED) {
+            try {
+                GBApplication.deviceService(device).onFetchRecordedData(RecordedDataTypes.TYPE_SYNC);
+            } catch (final RuntimeException ignored) {
+                SYNC_GATE.releaseFailedStart(requestAt);
+                status = AccompanyHealthSyncGate.Status.NOT_CONNECTED;
+            }
+        }
+        return status.wireValue();
+    }
+
+    private void enforceCallerPermission(final String message) {
+        final android.content.Context context = getContext();
+        if (context == null) throw new IllegalStateException("Health bridge context unavailable");
+        context.enforceCallingOrSelfPermission(READ_PERMISSION, message);
     }
 
     private static void requireFixedRead(
@@ -93,7 +152,7 @@ public class AccompanyHealthProvider extends ContentProvider {
             final String[] selectionArgs,
             final String sortOrder
     ) {
-        if (!SUMMARY_URI.equals(uri)) {
+        if (!SUMMARY_URI.equals(uri) && !LEGACY_SUMMARY_URI.equals(uri)) {
             throw new IllegalArgumentException("Unsupported health bridge URI");
         }
         if (projection != null || selection != null || selectionArgs != null || sortOrder != null) {
@@ -101,7 +160,7 @@ public class AccompanyHealthProvider extends ContentProvider {
         }
     }
 
-    private JSONObject readSnapshot() {
+    static JSONObject readSnapshot() {
         final long now = System.currentTimeMillis();
         final AccompanyHealthSnapshot output = new AccompanyHealthSnapshot(now);
         final GBDevice device = selectDevice();
@@ -111,8 +170,7 @@ public class AccompanyHealthProvider extends ContentProvider {
 
         try (DBHandler db = GBApplication.acquireDbReadOnly()) {
             populate(output, device, db, now);
-        } catch (final Exception ignored) {
-            // Do not log health values, device identity, database paths or query details.
+        } catch (final Exception error) {
             return AccompanyHealthSnapshot.error(now);
         }
         return output.build();
@@ -175,6 +233,7 @@ public class AccompanyHealthProvider extends ContentProvider {
                         .putDouble("totalCaloriesKcalToday", activeKcal + restingKcal, 0.0d, 200_000.0d);
             }
             populateActiveMinutes(output, todaySamples);
+            output.markDataUpdatedAt(latestActivityTimestampMs(todaySamples));
         }
         if (activityProvider != null) {
             final List<? extends ActivitySample> recentSamples = activityProvider.getAllActivitySamples(
@@ -189,7 +248,7 @@ public class AccompanyHealthProvider extends ContentProvider {
                     (int) ((todayStart - 12L * 60L * 60L * 1000L) / 1000L),
                     (int) (now / 1000L)
             );
-            populateSleep(output, sleepWindow);
+            populateSleep(output, sleepWindow, now);
         }
         if (coordinator.supportsHeartRateRestingMeasurement(device)) {
             final HeartRateSample sample = latestWithin(
@@ -199,7 +258,7 @@ public class AccompanyHealthProvider extends ContentProvider {
             );
             if (sample != null) {
                 output.putLong("restingHeartRateBpm", sample.getHeartRate(), 20L, 300L)
-                        .putTimestamp("restingHeartRateAt", sample.getTimestamp(), now);
+                        .putTimestamp("restingHeartRateAt", sample.getTimestamp(), now, "restingHeartRateBpm");
             }
         }
         if (coordinator.supportsSpo2(device)) {
@@ -210,7 +269,7 @@ public class AccompanyHealthProvider extends ContentProvider {
             );
             if (sample != null) {
                 output.putDouble("latestOxygenSaturationPercent", sample.getSpo2(), 50.0d, 100.0d)
-                        .putTimestamp("latestOxygenSaturationAt", sample.getTimestamp(), now);
+                        .putTimestamp("latestOxygenSaturationAt", sample.getTimestamp(), now, "latestOxygenSaturationPercent");
             }
         }
         if (coordinator.supportsStressMeasurement(device)) {
@@ -230,7 +289,7 @@ public class AccompanyHealthProvider extends ContentProvider {
             );
             if (sample != null) {
                 output.putLong("latestBodyEnergy", sample.getEnergy(), 0L, 100L)
-                        .putTimestamp("latestBodyEnergyAt", sample.getTimestamp(), now);
+                        .putTimestamp("latestBodyEnergyAt", sample.getTimestamp(), now, "latestBodyEnergy");
             }
         }
         if (coordinator.supportsPai(device)) {
@@ -242,7 +301,7 @@ public class AccompanyHealthProvider extends ContentProvider {
             if (sample != null) {
                 output.putDouble("vitalityScoreToday", sample.getPaiToday(), 0.0d, 1_000.0d)
                         .putDouble("vitalityScoreTotal", sample.getPaiTotal(), 0.0d, 10_000.0d)
-                        .putTimestamp("vitalityScoreAt", sample.getTimestamp(), now);
+                        .putTimestamp("vitalityScoreAt", sample.getTimestamp(), now, "vitalityScoreToday", "vitalityScoreTotal");
             }
         }
         if (coordinator.supportsTemperatureMeasurement(device)) {
@@ -253,7 +312,7 @@ public class AccompanyHealthProvider extends ContentProvider {
             );
             if (sample != null && sample.getTemperatureType() == TemperatureSample.TYPE_SKIN) {
                 output.putDouble("latestSkinTemperatureCelsius", sample.getTemperature(), 0.0d, 60.0d)
-                        .putTimestamp("latestSkinTemperatureAt", sample.getTimestamp(), now);
+                        .putTimestamp("latestSkinTemperatureAt", sample.getTimestamp(), now, "latestSkinTemperatureCelsius");
             }
         }
         if (coordinator.supportsHrvMeasurement(device)) {
@@ -264,7 +323,7 @@ public class AccompanyHealthProvider extends ContentProvider {
             );
             if (sample != null) {
                 output.putLong("latestHrvMs", sample.getValue(), 1L, 1_000L)
-                        .putTimestamp("latestHrvAt", sample.getTimestamp(), now);
+                        .putTimestamp("latestHrvAt", sample.getTimestamp(), now, "latestHrvMs");
             }
         }
         if (coordinator.supportsRespiratoryRate(device)) {
@@ -275,7 +334,7 @@ public class AccompanyHealthProvider extends ContentProvider {
             );
             if (sample != null) {
                 output.putDouble("latestRespiratoryRate", sample.getRespiratoryRate(), 1.0d, 100.0d)
-                        .putTimestamp("latestRespiratoryRateAt", sample.getTimestamp(), now);
+                        .putTimestamp("latestRespiratoryRateAt", sample.getTimestamp(), now, "latestRespiratoryRate");
             }
         }
         if (coordinator.supportsVO2Max(device)) {
@@ -286,7 +345,7 @@ public class AccompanyHealthProvider extends ContentProvider {
             );
             if (sample != null) {
                 output.putDouble("latestVo2Max", sample.getValue(), 1.0d, 100.0d)
-                        .putTimestamp("latestVo2MaxAt", sample.getTimestamp(), now);
+                        .putTimestamp("latestVo2MaxAt", sample.getTimestamp(), now, "latestVo2Max");
             }
         }
         if (coordinator.supportsBloodPressureMeasurement(device)) {
@@ -298,7 +357,7 @@ public class AccompanyHealthProvider extends ContentProvider {
             if (sample != null) {
                 output.putLong("latestSystolicPressure", sample.getBpSystolic(), 20L, 300L)
                         .putLong("latestDiastolicPressure", sample.getBpDiastolic(), 20L, 200L)
-                        .putTimestamp("latestBloodPressureAt", sample.getTimestamp(), now);
+                        .putTimestamp("latestBloodPressureAt", sample.getTimestamp(), now, "latestSystolicPressure", "latestDiastolicPressure");
             }
         }
     }
@@ -331,13 +390,14 @@ public class AccompanyHealthProvider extends ContentProvider {
         }
         if (latest != null) {
             output.putLong("latestHeartRateBpm", latest.getHeartRate(), 20L, 300L)
-                    .putTimestamp("latestHeartRateAt", latest.getTimestamp() * 1000L, now);
+                    .putTimestamp("latestHeartRateAt", latest.getTimestamp() * 1000L, now, "latestHeartRateBpm");
         }
     }
 
     private static void populateSleep(
             final AccompanyHealthSnapshot output,
-            final List<? extends ActivitySample> samples
+            final List<? extends ActivitySample> samples,
+            final long now
     ) {
         long light = 0L;
         long deep = 0L;
@@ -355,8 +415,31 @@ public class AccompanyHealthProvider extends ContentProvider {
                     .putLong("sleepLightMinutes", light, 0L, 2_160L)
                     .putLong("sleepDeepMinutes", deep, 0L, 2_160L)
                     .putLong("sleepRemMinutes", rem, 0L, 2_160L)
-                    .putLong("sleepAwakeMinutes", awake, 0L, 2_160L);
+                    .putLong("sleepAwakeMinutes", awake, 0L, 2_160L)
+                    .markDataUpdatedAt(latestSleepTimestampMs(samples, now));
         }
+    }
+
+    private static long latestActivityTimestampMs(final List<? extends ActivitySample> samples) {
+        long latestSeconds = 0L;
+        for (final ActivitySample sample : samples) {
+            latestSeconds = Math.max(latestSeconds, sample.getTimestamp());
+        }
+        return latestSeconds * 1000L;
+    }
+
+    private static long latestSleepTimestampMs(
+            final List<? extends ActivitySample> samples,
+            final long now
+    ) {
+        long latestSeconds = 0L;
+        for (final ActivitySample sample : samples) {
+            if (ActivityKind.isSleep(sample.getKind())) {
+                latestSeconds = Math.max(latestSeconds, sample.getTimestamp());
+            }
+        }
+        final long latest = latestSeconds * 1000L;
+        return latest <= now + 5L * 60L * 1000L ? latest : 0L;
     }
 
     private static void populateStress(
@@ -391,7 +474,7 @@ public class AccompanyHealthProvider extends ContentProvider {
                 .putLong("stressModerateMinutes", categoryMinutes[2], 0L, 1_440L)
                 .putLong("stressHighMinutes", categoryMinutes[3], 0L, 1_440L)
                 .putLong("latestStressScore", latest.getStress(), 1L, 100L)
-                .putTimestamp("latestStressAt", latest.getTimestamp(), now);
+                .putTimestamp("latestStressAt", latest.getTimestamp(), now, "latestStressScore");
     }
 
     @Nullable
@@ -412,7 +495,9 @@ public class AccompanyHealthProvider extends ContentProvider {
     @Nullable
     @Override
     public String getType(@NonNull final Uri uri) {
-        return SUMMARY_URI.equals(uri) ? "application/vnd.accompany.health-summary+json" : null;
+        return SUMMARY_URI.equals(uri) || LEGACY_SUMMARY_URI.equals(uri)
+                ? "application/vnd.accompany.health-summary+json"
+                : null;
     }
 
     @Nullable

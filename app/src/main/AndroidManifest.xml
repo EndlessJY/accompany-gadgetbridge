@@ -117,6 +117,7 @@
 
     <!-- Needed to show notification with targetSdkVersion 33 with Android 13 -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
+    <uses-permission android:name="com.example.sender.permission.READ_GADGETBRIDGE_HEALTH" />
 
     <!-- Needed for Health Connect See this for more: https://developer.android.com/health-and-fitness/guides/health-connect/plan/data-types#alpha10 -->
     <uses-permission android:name="android.permission.health.WRITE_ACTIVE_CALORIES_BURNED"/>
@@ -909,11 +910,13 @@
 
         <provider
             android:name=".contentprovider.AccompanyHealthProvider"
-            android:authorities="com.example.sender.gadgetbridge.health"
+            android:authorities="nodomain.freeyourgadget.gadgetbridge.accompany.health;com.example.sender.gadgetbridge.health"
             android:exported="true"
-            android:grantUriPermissions="false"
-            android:readPermission="com.example.sender.permission.READ_GADGETBRIDGE_HEALTH"
-            android:writePermission="com.example.sender.permission.READ_GADGETBRIDGE_HEALTH" />
+            android:grantUriPermissions="false" />
+
+        <service
+            android:name=".contentprovider.AccompanyHealthBridgeService"
+            android:exported="true" />
 
         <provider
             android:name="androidx.core.content.FileProvider"

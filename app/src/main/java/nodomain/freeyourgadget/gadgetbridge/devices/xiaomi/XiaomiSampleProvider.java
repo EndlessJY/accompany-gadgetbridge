@@ -22,10 +22,12 @@ import androidx.annotation.Nullable;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.util.Calendar;
 import java.util.List;
 
 import de.greenrobot.dao.AbstractDao;
 import de.greenrobot.dao.Property;
+import nodomain.freeyourgadget.gadgetbridge.contentprovider.AccompanyRealtimeActivitySnapshot;
 import nodomain.freeyourgadget.gadgetbridge.devices.AbstractSampleProvider;
 import nodomain.freeyourgadget.gadgetbridge.devices.XiaomiSleepStageSampleProvider;
 import nodomain.freeyourgadget.gadgetbridge.devices.XiaomiSleepTimeSampleProvider;
@@ -97,8 +99,52 @@ public class XiaomiSampleProvider extends AbstractSampleProvider<XiaomiActivityS
 
         convertCalories(samples);
         overlaySleep(samples, timestamp_from, timestamp_to);
+        overlayRealtimeSnapshot(samples, timestamp_from, timestamp_to);
 
         return samples;
+    }
+
+    private void overlayRealtimeSnapshot(
+            final List<XiaomiActivitySample> samples,
+            final int timestampFrom,
+            final int timestampTo
+    ) {
+        final AccompanyRealtimeActivitySnapshot.Value snapshot =
+                AccompanyRealtimeActivitySnapshot.currentFor(getDevice(), System.currentTimeMillis());
+        if (snapshot == null) return;
+
+        final int observedAt = (int) (snapshot.getObservedAtMs() / 1000L);
+        final Calendar startOfDay = Calendar.getInstance();
+        startOfDay.setTimeInMillis(snapshot.getObservedAtMs());
+        startOfDay.set(Calendar.HOUR_OF_DAY, 0);
+        startOfDay.set(Calendar.MINUTE, 0);
+        startOfDay.set(Calendar.SECOND, 0);
+        startOfDay.set(Calendar.MILLISECOND, 0);
+        if (timestampFrom > startOfDay.getTimeInMillis() / 1000L || timestampTo < observedAt) {
+            return;
+        }
+
+        long storedSteps = 0L;
+        for (final XiaomiActivitySample sample : samples) {
+            if (sample.getSteps() != ActivitySample.NOT_MEASURED && sample.getSteps() > 0) {
+                storedSteps += sample.getSteps();
+            }
+        }
+
+        final XiaomiActivitySample current = createActivitySample();
+        current.setTimestamp(observedAt);
+        current.setRawIntensity(0);
+        current.setSteps(AccompanyRealtimeActivitySnapshot.missingSteps(
+                storedSteps,
+                snapshot.getStepsToday()
+        ));
+        current.setRawKind(ActivityKind.ACTIVITY.getCode());
+        current.setHeartRate(snapshot.getHeartRate());
+        current.setDistanceCm(0);
+        current.setActiveCalories(0);
+        current.setEnergy(ActivitySample.NOT_MEASURED);
+        current.setProvider(this);
+        samples.add(current);
     }
 
     private void convertCalories(final List<XiaomiActivitySample> samples) {
