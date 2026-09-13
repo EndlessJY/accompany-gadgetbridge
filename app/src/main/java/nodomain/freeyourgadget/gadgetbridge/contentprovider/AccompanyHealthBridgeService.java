@@ -27,7 +27,7 @@ public class AccompanyHealthBridgeService extends Service {
         @Override
         public String readSummary() {
             enforceBridgePermission("Caller cannot read wearable health data");
-            return AccompanyHealthSnapshotPublisher.latestOrRead();
+            return AccompanyHealthSnapshotPublisher.readCurrent();
         }
 
         @Override

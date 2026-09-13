@@ -144,12 +144,6 @@ public class XiaomiActivityFileFetcher {
 
         dumpBytesToExternalStorage(fileId, data);
 
-        if (!XiaomiPreferences.keepActivityDataOnDevice(mHealthService.getSupport().getDevice())) {
-            LOG.debug("Acking recorded data {}", fileId);
-            // TODO is this too early?
-            mHealthService.ackRecordedData(fileId);
-        }
-
         final XiaomiActivityParser activityParser = XiaomiActivityParser.create(fileId);
         if (activityParser == null) {
             LOG.warn("Failed to find parser for {}", fileId);
@@ -157,12 +151,21 @@ public class XiaomiActivityFileFetcher {
             return;
         }
 
+        boolean parsed = false;
+        boolean emptyPlaceholder = false;
         try {
-            if (activityParser.parse(mHealthService.getSupport().getContext(), mHealthService.getSupport().getDevice(), fileId, data)) {
+            parsed = activityParser.parse(
+                    mHealthService.getSupport().getContext(),
+                    mHealthService.getSupport().getDevice(),
+                    fileId,
+                    data
+            );
+            if (parsed) {
                 LOG.info("Successfully parsed {}", fileId);
             } else if (data != null && data.length <= 16) {
                 // Indoor / no-fix placeholder (13-byte GPS_TRACK shell) — parser already logged
                 // the no-samples reason. Avoid the WARN-level "Failed to parse".
+                emptyPlaceholder = true;
                 LOG.info("Skipped empty placeholder {}", fileId);
             } else {
                 LOG.warn("Failed to parse {}", fileId);
@@ -171,7 +174,24 @@ public class XiaomiActivityFileFetcher {
             LOG.error("Exception while parsing {}", fileId, ex);
         }
 
+        final boolean keepOnDevice = XiaomiPreferences.keepActivityDataOnDevice(
+                mHealthService.getSupport().getDevice()
+        );
+        if (shouldAcknowledge(keepOnDevice, true, parsed, emptyPlaceholder)) {
+            LOG.debug("Acking durably handled recorded data {}", fileId);
+            mHealthService.ackRecordedData(fileId);
+        }
+
         triggerNextFetch();
+    }
+
+    static boolean shouldAcknowledge(
+            final boolean keepOnDevice,
+            final boolean parserFound,
+            final boolean parseSucceeded,
+            final boolean emptyPlaceholder
+    ) {
+        return !keepOnDevice && parserFound && (parseSucceeded || emptyPlaceholder);
     }
 
     public void setAwaitingPastResponse(final boolean awaiting) {

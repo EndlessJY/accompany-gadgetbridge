@@ -53,6 +53,44 @@ public final class AccompanyRealtimeActivitySnapshot {
         return currentForAddress(latest, device.getAddress(), nowMs);
     }
 
+    public static void applyTo(
+            final AccompanyHealthSnapshot output,
+            final GBDevice device,
+            final long nowMs
+    ) {
+        if (device == null) return;
+        applyToSnapshot(output, latest, device.getAddress(), nowMs);
+    }
+
+    static void applyToSnapshot(
+            final AccompanyHealthSnapshot output,
+            @Nullable final Value value,
+            final String deviceAddress,
+            final long nowMs
+    ) {
+        if (output == null) return;
+        final Value current = currentForAddress(value, deviceAddress, nowMs);
+        if (current == null) return;
+
+        final Long storedSteps = output.longValueOrNull("stepsToday");
+        if (storedSteps == null || storedSteps != current.stepsToday) {
+            // Distance is aggregated from the older minute samples. Keeping that exact value next
+            // to a newer realtime step total would imply a precision the snapshot does not have.
+            output.removeMetric("distanceMetersToday");
+        }
+        output.putLong("stepsToday", current.stepsToday, 0L, MAX_STEPS)
+                .markDataUpdatedAt(current.observedAtMs);
+        if (current.heartRate >= MIN_HEART_RATE && current.heartRate <= MAX_HEART_RATE) {
+            output.putLong("latestHeartRateBpm", current.heartRate, MIN_HEART_RATE, MAX_HEART_RATE)
+                    .putTimestamp(
+                            "latestHeartRateAt",
+                            current.observedAtMs,
+                            nowMs,
+                            "latestHeartRateBpm"
+                    );
+        }
+    }
+
     @Nullable
     static Value validated(
             final String deviceAddress,

@@ -75,6 +75,7 @@ import nodomain.freeyourgadget.gadgetbridge.R;
 import nodomain.freeyourgadget.gadgetbridge.activities.HeartRateUtils;
 import nodomain.freeyourgadget.gadgetbridge.contentprovider.AccompanyHealthProvider;
 import nodomain.freeyourgadget.gadgetbridge.contentprovider.AccompanyHealthSnapshotPublisher;
+import nodomain.freeyourgadget.gadgetbridge.contentprovider.AccompanyHealthSyncSchedule;
 import nodomain.freeyourgadget.gadgetbridge.devices.DeviceCoordinator;
 import nodomain.freeyourgadget.gadgetbridge.externalevents.BluetoothConnectReceiver;
 import nodomain.freeyourgadget.gadgetbridge.impl.GBDevice;
@@ -85,9 +86,9 @@ import nodomain.freeyourgadget.gadgetbridge.util.GBPrefs;
 import nodomain.freeyourgadget.gadgetbridge.util.Prefs;
 
 public class DeviceCommunicationService extends Service implements SharedPreferences.OnSharedPreferenceChangeListener {
-    private static final long ACCOMPANY_HEALTH_INITIAL_SYNC_DELAY_MS = 30_000L;
+    private static final long ACCOMPANY_HEALTH_INITIAL_SYNC_DELAY_MS = 10_000L;
     private static final long ACCOMPANY_HEALTH_CONNECTED_SYNC_DELAY_MS = 5_000L;
-    private static final long ACCOMPANY_HEALTH_SYNC_INTERVAL_MS = 15L * 60L * 1000L;
+    private static final long ACCOMPANY_HEALTH_PUBLISH_AFTER_SYNC_MS = 20_000L;
     public static class DeviceStruct {
         private GBDevice device;
         private DeviceCoordinator coordinator;
@@ -148,25 +149,44 @@ public class DeviceCommunicationService extends Service implements SharedPrefere
 
     private final HashMap<String, Long> deviceLastScannedTimestamps = new HashMap<>();
     private final Handler accompanyHealthHandler = new Handler(Looper.getMainLooper());
+    private boolean accompanyHealthSyncEnabled = false;
     private final Runnable accompanyHealthSync = new Runnable() {
         @Override
         public void run() {
+            String status = null;
             try {
-                AccompanyHealthProvider.requestSyncStatus();
+                status = requestAccompanyHealthSync();
             } catch (final RuntimeException ignored) {
-                // Keep the foreground service alive; the next bounded interval retries.
+                // Keep the foreground service alive; the bounded retry handles transient failures.
             } finally {
-                accompanyHealthHandler.postDelayed(this, ACCOMPANY_HEALTH_SYNC_INTERVAL_MS);
+                if (accompanyHealthSyncEnabled) {
+                    accompanyHealthHandler.postDelayed(
+                            this,
+                            AccompanyHealthSyncSchedule.nextDelayMs(status)
+                    );
+                }
             }
         }
     };
     private final Runnable accompanyHealthConnectedSync = () -> {
         try {
-            AccompanyHealthProvider.requestSyncStatus();
+            requestAccompanyHealthSync();
         } catch (final RuntimeException ignored) {
-            // A later data event or bounded interval retries without affecting the device service.
+            scheduleAccompanyHealthSync(60_000L);
         }
     };
+
+    private String requestAccompanyHealthSync() {
+        final String status = AccompanyHealthProvider.requestSyncStatus();
+        AccompanyHealthSnapshotPublisher.schedule(this, ACCOMPANY_HEALTH_PUBLISH_AFTER_SYNC_MS);
+        return status;
+    }
+
+    private void scheduleAccompanyHealthSync(final long delayMs) {
+        if (!accompanyHealthSyncEnabled) return;
+        accompanyHealthHandler.removeCallbacks(accompanyHealthSync);
+        accompanyHealthHandler.postDelayed(accompanyHealthSync, Math.max(0L, delayMs));
+    }
 
     private final int NOTIFICATIONS_CACHE_MAX = 10;  // maximum amount of notifications to cache per device while disconnected
     private boolean allowBluetoothIntentApi = false;
@@ -420,11 +440,9 @@ public class DeviceCommunicationService extends Service implements SharedPrefere
         }
 
         startForeground();
-        AccompanyHealthSnapshotPublisher.schedule(this, 0L);
-        accompanyHealthHandler.postDelayed(
-                accompanyHealthSync,
-                ACCOMPANY_HEALTH_INITIAL_SYNC_DELAY_MS
-        );
+        accompanyHealthSyncEnabled = true;
+        AccompanyHealthSnapshotPublisher.schedule(this, ACCOMPANY_HEALTH_INITIAL_SYNC_DELAY_MS);
+        scheduleAccompanyHealthSync(ACCOMPANY_HEALTH_INITIAL_SYNC_DELAY_MS);
         if (reconnectViaScan) {
             scanAllDevices();
 
@@ -849,6 +867,7 @@ public class DeviceCommunicationService extends Service implements SharedPrefere
 
     @Override
     public void onDestroy() {
+        accompanyHealthSyncEnabled = false;
         accompanyHealthHandler.removeCallbacks(accompanyHealthSync);
         accompanyHealthHandler.removeCallbacks(accompanyHealthConnectedSync);
         if (hasPrefs()) {

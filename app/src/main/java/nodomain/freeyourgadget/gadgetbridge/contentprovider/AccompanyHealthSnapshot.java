@@ -71,6 +71,22 @@ final class AccompanyHealthSnapshot {
         return this;
     }
 
+    Long longValueOrNull(final String key) {
+        if (!values.has(key)) return null;
+        try {
+            return values.getLong(key);
+        } catch (final JSONException ignored) {
+            return null;
+        }
+    }
+
+    AccompanyHealthSnapshot removeMetric(final String key) {
+        if (values.remove(key) != null && metricCount > 0) {
+            metricCount--;
+        }
+        return this;
+    }
+
     JSONObject build() {
         put("state", metricCount > 0 ? "ready" : "no_data");
         if (metricCount > 0 && dataUpdatedAt > 0L) {

@@ -1,6 +1,7 @@
 package nodomain.freeyourgadget.gadgetbridge.contentprovider;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
 
@@ -60,5 +61,65 @@ public class AccompanyRealtimeActivitySnapshotTest {
                 "AA:BB",
                 observed.getTimeInMillis() + 2L * 60L * 1000L
         ));
+    }
+
+    @Test
+    public void freshRealtimeObservationOverridesStaleDatabaseActivityAndTimestamp() throws Exception {
+        final long now = 1_800_000_000_000L;
+        final long observedAt = now - 2_000L;
+        final AccompanyRealtimeActivitySnapshot.Value value =
+                AccompanyRealtimeActivitySnapshot.validated("AA:BB", 456, 82, observedAt);
+        final AccompanyHealthSnapshot output = new AccompanyHealthSnapshot(now)
+                .putLong("stepsToday", 89L, 0L, 500_000L)
+                .putLong("latestHeartRateBpm", 61L, 20L, 300L)
+                .putTimestamp("latestHeartRateAt", now - 90L * 60L * 1000L, now, "latestHeartRateBpm")
+                .markDataUpdatedAt(now - 90L * 60L * 1000L);
+
+        AccompanyRealtimeActivitySnapshot.applyToSnapshot(output, value, "AA:BB", now);
+        final org.json.JSONObject snapshot = output.build();
+
+        assertEquals(456L, snapshot.getLong("stepsToday"));
+        assertEquals(82L, snapshot.getLong("latestHeartRateBpm"));
+        assertEquals(observedAt, snapshot.getLong("latestHeartRateAt"));
+        assertEquals(observedAt, snapshot.getLong("dataUpdatedAt"));
+    }
+
+    @Test
+    public void fresherStepTotalDoesNotKeepDistanceFromOlderDetailedSamples() throws Exception {
+        final long now = 1_800_000_000_000L;
+        final AccompanyRealtimeActivitySnapshot.Value value =
+                AccompanyRealtimeActivitySnapshot.validated("AA:BB", 456, 82, now - 2_000L);
+        final AccompanyHealthSnapshot output = new AccompanyHealthSnapshot(now)
+                .putLong("stepsToday", 89L, 0L, 500_000L)
+                .putDouble("distanceMetersToday", 57.0d, 0.0d, 1_000_000.0d);
+
+        AccompanyRealtimeActivitySnapshot.applyToSnapshot(output, value, "AA:BB", now);
+        final org.json.JSONObject snapshot = output.build();
+
+        assertEquals(456L, snapshot.getLong("stepsToday"));
+        assertFalse(snapshot.has("distanceMetersToday"));
+    }
+
+    @Test
+    public void expiredRealtimeObservationDoesNotMakeOldDatabaseDataLookFresh() throws Exception {
+        final long now = 1_800_000_000_000L;
+        final long storedAt = now - 90L * 60L * 1000L;
+        final AccompanyRealtimeActivitySnapshot.Value value =
+                AccompanyRealtimeActivitySnapshot.validated(
+                        "AA:BB",
+                        456,
+                        82,
+                        now - AccompanyRealtimeActivitySnapshot.MAX_AGE_MS - 1L
+                );
+        final AccompanyHealthSnapshot output = new AccompanyHealthSnapshot(now)
+                .putLong("stepsToday", 89L, 0L, 500_000L)
+                .markDataUpdatedAt(storedAt);
+
+        AccompanyRealtimeActivitySnapshot.applyToSnapshot(output, value, "AA:BB", now);
+        final org.json.JSONObject snapshot = output.build();
+
+        assertEquals(89L, snapshot.getLong("stepsToday"));
+        assertEquals(storedAt, snapshot.getLong("dataUpdatedAt"));
+        assertFalse(snapshot.has("latestHeartRateAt"));
     }
 }

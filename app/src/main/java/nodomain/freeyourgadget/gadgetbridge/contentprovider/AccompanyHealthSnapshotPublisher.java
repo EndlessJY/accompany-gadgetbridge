@@ -35,7 +35,6 @@ public final class AccompanyHealthSnapshotPublisher {
         return thread;
     });
     private static ScheduledFuture<?> pending;
-    private static volatile String latestSnapshotJson;
 
     private AccompanyHealthSnapshotPublisher() {
     }
@@ -62,19 +61,15 @@ public final class AccompanyHealthSnapshotPublisher {
         if (!"ready".equals(state) && !"no_data".equals(state)) {
             return;
         }
-        latestSnapshotJson = snapshot.toString();
+        final String snapshotJson = snapshot.toString();
         final Intent intent = new Intent(ACTION_SNAPSHOT)
                 .setComponent(new ComponentName(SENDER_PACKAGE, SENDER_RECEIVER))
                 .addFlags(Intent.FLAG_INCLUDE_STOPPED_PACKAGES)
-                .putExtra(EXTRA_SNAPSHOT_JSON, latestSnapshotJson);
+                .putExtra(EXTRA_SNAPSHOT_JSON, snapshotJson);
         context.sendBroadcast(intent, AccompanyHealthProvider.READ_PERMISSION);
     }
 
-    static String latestOrRead() {
-        final String cached = latestSnapshotJson;
-        if (cached != null) {
-            return cached;
-        }
+    static String readCurrent() {
         return AccompanyHealthProvider.readSnapshot().toString();
     }
 }

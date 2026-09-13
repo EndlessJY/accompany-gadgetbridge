@@ -9,9 +9,15 @@ upstream project.
 
 - Upstream release: `0.93.0`
 - Upstream commit: `a09e037374d0013ffc31978fc1d1ada2943280e4`
-- Compatible build identity: `0.93.0-accompany.12`
-- Android version code: `264`
+- Compatible build identity: `0.93.0-accompany.15`
+- Android version code: `267`
 - License: GNU Affero General Public License version 3 or later
+
+This branch deliberately follows the latest stable upstream tag rather than the
+rolling `upstream/master`. Post-release upstream fixes that affect the supported
+Xiaomi health path are reviewed individually. The current Accompany release also
+includes upstream's null-safe resting-heart-rate query fix so an absent optional
+daily-summary value cannot invalidate the whole bridge snapshot.
 
 The `upstream` remote points to the official Codeberg repository for fetches.
 The writable `origin` remote is the independent GitHub repository
@@ -54,12 +60,27 @@ starts are limited to once per two minutes. The result contains only
 returns health data, sample times or wearable identity.
 
 Gadgetbridge's foreground device service invokes that same gated normal sync
-every 15 minutes while a supported wearable is connected and five seconds
-after the wearable reconnects. It never forces an intentionally disconnected
-wearable to connect. After Gadgetbridge announces that newly synchronized data
-was written, summary publication is debounced by ten seconds and sent to the
-fixed sender receiver. Repeated reads or deliveries do not alter source
-freshness.
+ten seconds after service startup, every five minutes after an accepted sync,
+one to two minutes after transient busy/disconnected/rate-limited results, and
+five seconds after the wearable reconnects. Unsupported devices use a quiet
+15-minute fallback. It never forces an intentionally disconnected wearable to
+connect. After a sync request, publication is scheduled after 20 seconds; after
+Gadgetbridge announces that newly synchronized data was written, publication is
+debounced by ten seconds and sent to the fixed sender receiver. Binder reads
+always rebuild the snapshot from current database/realtime state rather than
+returning an indefinitely cached publication. Repeated reads or deliveries do
+not alter source freshness.
+
+The five-minute interval is a request cadence, not a promise that the wearable
+will finalize a new record every five minutes. A request is deferred while the
+device is disconnected or busy, Android can delay in-process timers while the
+phone is deeply asleep, and Xiaomi firmware may expose several minutes as one
+later batch. The foreground service is `START_STICKY`, but a reboot or package
+replacement can reconnect the wearable only when Gadgetbridge's existing
+**Start automatically** and **Connect to Gadgetbridge device(s) when Bluetooth
+is turned on** settings are enabled. Android's system Bluetooth connection alone
+does not prove that Gadgetbridge has initialized its device session. The fork
+does not override an intentional disconnect.
 
 The provider first uses Gadgetbridge's selected activity-capable wearable. If
 none is selected and exactly one stored activity-capable wearable exists, that
@@ -81,10 +102,19 @@ them appear fresh. If no contributing source timestamp is available,
 `dataUpdatedAt` is omitted rather than copied from `readAt`.
 
 For Xiaomi Smart Band 9 Pro, a normal recorded-data sync also takes one bounded realtime
-snapshot. The band can expose its current day total before it finalizes the matching activity
-file. Gadgetbridge overlays only the difference that is still missing from the detailed database,
-keeps the overlay for at most 20 minutes, and never persists it as a second activity record. This
-keeps Gadgetbridge and Accompany current without double-counting when the detailed file arrives.
+snapshot. The band can expose its current day step total and heart rate before it finalizes the
+matching activity file. Gadgetbridge overlays those two readings for at most 20 minutes and never
+persists them as a second activity record. When realtime steps are newer than detailed samples,
+the older exact distance is omitted so Accompany can show its existing approximate-distance
+fallback instead of mixing timestamps. Other metrics continue to come from checksum-validated,
+parsed wearable records and retain their source sample times.
+
+Xiaomi activity files are checksum-validated before parsing. When the user's
+normal removal setting is enabled, the fork acknowledges a file back to the
+wearable only after it has been parsed and persisted successfully, or after it
+has been positively classified as an empty placeholder. Unsupported, failed or
+exceptional parses remain unacknowledged so a later compatible build can fetch
+them again instead of silently creating a permanent gap.
 
 ## Validation
 

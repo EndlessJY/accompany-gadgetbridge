@@ -173,6 +173,7 @@ public class AccompanyHealthProvider extends ContentProvider {
         } catch (final Exception error) {
             return AccompanyHealthSnapshot.error(now);
         }
+        AccompanyRealtimeActivitySnapshot.applyTo(output, device, now);
         return output.build();
     }
 
